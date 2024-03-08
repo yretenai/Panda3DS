@@ -37,6 +37,7 @@ namespace FSCommands {
 		FormatSaveData = 0x084C0242,
 		CreateExtSaveData = 0x08510242,
 		DeleteExtSaveData = 0x08520100,
+		ReadExtSaveDataIcon = 0x08530142,
 		SetArchivePriority = 0x085A00C0,
 		InitializeWithSdkVersion = 0x08610042,
 		SetPriority = 0x08620040,
@@ -163,6 +164,12 @@ FSPath FSService::readPath(u32 type, u32 pointer, u32 size) {
 	return FSPath(type, data);
 }
 
+void FSService::writePointer(const u8* data, u32 pointer, u32 size) {
+	for (u32 i = 0; i < size; i++) {
+		mem.write8(pointer + i, data[i]);
+	}
+}
+
 void FSService::handleSyncRequest(u32 messagePointer) {
 	const u32 command = mem.read32(messagePointer);
 	switch (command) {
@@ -173,6 +180,7 @@ void FSService::handleSyncRequest(u32 messagePointer) {
 		case FSCommands::ControlArchive: controlArchive(messagePointer); break;
 		case FSCommands::CloseArchive: closeArchive(messagePointer); break;
 		case FSCommands::DeleteDirectory: deleteDirectory(messagePointer); break;
+		case FSCommands::DeleteDirectoryRecursively: deleteDirectoryRecursively(messagePointer); break;
 		case FSCommands::DeleteExtSaveData: deleteExtSaveData(messagePointer); break;
 		case FSCommands::DeleteFile: deleteFile(messagePointer); break;
 		case FSCommands::FormatSaveData: formatSaveData(messagePointer); break;
@@ -196,6 +204,7 @@ void FSService::handleSyncRequest(u32 messagePointer) {
 		case FSCommands::SetPriority: setPriority(messagePointer); break;
 		case FSCommands::SetThisSaveDataSecureValue: setThisSaveDataSecureValue(messagePointer); break;
 		case FSCommands::AbnegateAccessRight: abnegateAccessRight(messagePointer); break;
+		case FSCommands::ReadExtSaveDataIcon: readExtSaveDataIcon(messagePointer); break;
 		case FSCommands::TheGameboyVCFunction: theGameboyVCFunction(messagePointer); break;
 		default: Helpers::panic("FS service requested. Command: %08X\n", command);
 	}
@@ -436,6 +445,18 @@ void FSService::deleteDirectory(u32 messagePointer) {
 	mem.write32(messagePointer + 4, Result::Success);
 }
 
+void FSService::deleteDirectoryRecursively(u32 messagePointer) {
+	const Handle archiveHandle = Handle(mem.read64(messagePointer + 8));
+	const u32 filePathType = mem.read32(messagePointer + 16);
+	const u32 filePathSize = mem.read32(messagePointer + 20);
+	const u32 filePathPointer = mem.read32(messagePointer + 28);
+	log("FS::DeleteDirectoryRecursively\n");
+
+	Helpers::warn("Stubbed FS::DeleteDirectoryRecursively call!");
+	mem.write32(messagePointer, IPC::responseHeader(0x807, 1, 0));
+	mem.write32(messagePointer + 4, Result::Success);
+}
+
 void FSService::getFormatInfo(u32 messagePointer) {
 	const u32 archiveID = mem.read32(messagePointer + 4);
 	const u32 pathType = mem.read32(messagePointer + 8);
@@ -511,30 +532,95 @@ void FSService::deleteExtSaveData(u32 messagePointer) {
 	const u64 saveID = mem.read64(messagePointer + 8);
 	log("FS::DeleteExtSaveData (media type = %d, saveID = %llx) (stubbed)\n", mediaType, saveID);
 
-	mem.write32(messagePointer, IPC::responseHeader(0x0852, 1, 0));
 	// TODO: We can't properly implement this yet until we properly support title/save IDs. We will stub this and insert a warning for now. Required for Planet Robobot
-	// When we properly implement it, it will just be a recursive directory deletion
+	/*
+	FSPath path = readPath(PathType::Binary, messagePointer + 4, 8);
+
+	switch (mediaType) {
+		case MediaType::NAND: sharedExtSaveData_nand.clear(path); break;
+		case MediaType::SD: extSaveData_sdmc.clear(path); break;
+		default: Helpers::warn("FS::DeleteExtSaveData: Unhandled ExtSaveData MediaType %d", static_cast<s32>(mediaType)); break;
+	}
+	*/
+
+	mem.write32(messagePointer, IPC::responseHeader(0x0852, 1, 0));
 	mem.write32(messagePointer + 4, Result::Success);
 }
 
 void FSService::createExtSaveData(u32 messagePointer) {
-	Helpers::warn("Stubbed call to FS::CreateExtSaveData!");
+	log("FS::CreateExtSaveData\n");
 	// First 4 words of parameters are the ExtSaveData info
 	// https://www.3dbrew.org/wiki/Filesystem_services#ExtSaveDataInfo
 	// This creates the ExtSaveData with the specified saveid in the specified media type. It stores the SMDH as "icon" in the root of the created directory. 
 	const u8 mediaType = mem.read8(messagePointer + 4);
-	const u64 saveID = mem.read64(messagePointer + 8);
+	const u64 saveID = mem.read64(messagePointer + 8); // todo: <-- how should this be used? ATM everything is in the same space.
 	const u32 numOfDirectories = mem.read32(messagePointer + 20);
 	const u32 numOfFiles = mem.read32(messagePointer + 24);
 	const u64 sizeLimit = mem.read64(messagePointer + 28);
 	const u32 smdhSize = mem.read32(messagePointer + 36);
 	const u32 smdhPointer = mem.read32(messagePointer + 44);
 
-	log("FS::CreateExtSaveData (stubbed)\n");
+	ArchiveBase::FormatInfo info {
+		.size = 0,
+		.numOfDirectories = numOfDirectories,
+		.numOfFiles = numOfFiles,
+		.duplicateData = false
+	};
+	FSPath path = readPath(PathType::Binary, messagePointer + 4, 32);
+
+	ExtSaveDataArchive* selected = nullptr;
+	switch(mediaType) {
+		case MediaType::NAND: selected = &sharedExtSaveData_nand; break;
+		case MediaType::SD: selected = &extSaveData_sdmc; break;
+		default: Helpers::warn("FS::CreateExtSaveData - Unhandled ExtSaveData MediaType %d", static_cast<s32>(mediaType)); break;
+	}
+
+	if (selected != nullptr) {
+		selected->format(path, info);
+
+		if (smdhSize > 0) {
+			const FSPath smdh = readPath(PathType::Binary, smdhPointer, smdhSize);
+			selected->saveIcon(smdh.binary);
+		}
+	}
 
 	mem.write32(messagePointer, IPC::responseHeader(0x0851, 1, 0));
-	// TODO: Similar to DeleteExtSaveData, we need to refactor how our ExtSaveData stuff works before properly implementing this
 	mem.write32(messagePointer + 4, Result::Success);
+}
+
+void FSService::readExtSaveDataIcon(u32 messagePointer) {
+	log("FS::ReadExtSaveDataIcon\n");
+	const u8 mediaType = mem.read8(messagePointer + 4);
+	const u64 saveID = mem.read64(messagePointer + 8); // todo: <-- is this used?
+	const u32 smdhSize = mem.read32(messagePointer + 20);
+	const u32 smdhPointer = mem.read32(messagePointer + 28);
+
+	ExtSaveDataArchive* selected = nullptr;
+	switch(mediaType) {
+		case MediaType::NAND:
+			selected = &sharedExtSaveData_nand;
+		break;
+		case MediaType::SD:
+			selected = &extSaveData_sdmc;
+		break;
+		default:
+			Helpers::warn("FS::ReadExtSaveDataIcon - Unhandled ExtSaveData MediaType %d", static_cast<s32>(mediaType));
+		break;
+	}
+
+	mem.write32(messagePointer, IPC::responseHeader(0x0851, 1, 0));
+
+	Rust::Result<std::vector<u8>, HorizonResult> data = selected == nullptr ? Err(Result::FS::NotFoundInvalid) : selected->loadIcon();
+	if (data.isErr()) {
+		mem.write32(messagePointer + 4, data.unwrapErr());;
+		mem.write32(messagePointer + 8, 0);
+	} else {
+		const std::vector<u8> buffer = data.unwrap<std::vector<u8>>();
+		const u32 copySize = std::min(smdhSize, static_cast<u32>(buffer.size()));
+		writePointer(buffer.data(), smdhPointer, copySize);
+		mem.write32(messagePointer + 4, Result::Success);
+		mem.write32(messagePointer + 8, copySize);
+	}
 }
 
 void FSService::formatThisUserSaveData(u32 messagePointer) {
