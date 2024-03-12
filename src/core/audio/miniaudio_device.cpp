@@ -81,8 +81,8 @@ void MiniAudioDevice::init(Samples& samples, bool safe) {
 	deviceConfig.playback.format = ma_format_s16;
 	deviceConfig.playback.channels = channelCount;
 	deviceConfig.sampleRate = sampleRate;
-	//deviceConfig.periodSizeInFrames = 64;
-	//deviceConfig.periods = 16;
+	deviceConfig.periodSizeInFrames = 1024 / channelCount;
+	deviceConfig.periods = 16;
 	deviceConfig.pUserData = this;
 	deviceConfig.aaudio.usage = ma_aaudio_usage_game;
 	deviceConfig.wasapi.noAutoConvertSRC = true;
